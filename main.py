@@ -2,6 +2,8 @@ import asyncio
 import httpx
 from time import perf_counter
 import xml.etree.ElementTree as ET
+import openpyxl
+import os
 
 
 async def log_request(request):
@@ -12,7 +14,35 @@ async def log_response(response):
     print(f"Response: {response.url!r} {response.status_code!r}")
 
 
-async def get_exhibitors():
+# Function to cache the XML data to a file
+def cache_xml(data):
+    with open('exhibitors.xml', 'w') as f:
+        f.write(data)
+
+
+# Function to save exhibitor data to an Excel sheet
+def save_to_excel(exhibitors):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Name", "Country Code", "Country", "City", "Postcode", "Email", "Stand Name", "Contacts", "Teaser", "Product Names"])
+    for exhibitor in exhibitors:
+        contacts = ", ".join([f"{contact['firstName']} {contact['lastName']} - {contact['position']}" for contact in exhibitor['contacts']])
+        ws.append([
+                exhibitor['name'],
+                exhibitor['countryCode'],
+                exhibitor['country'],
+                exhibitor['city'],
+                exhibitor['postcode'],
+                exhibitor['email'],
+                exhibitor['standName'],
+                contacts,
+                exhibitor['teaser'] if 'teaser' in exhibitor else 'N/A',
+                ", ".join(exhibitor['product_names'] if 'product_names' in exhibitor else 'N/A')
+            ])
+    wb.save("exhibitors3.xlsx")
+
+
+async def get_exhibitors(start_result_row):
     url = 'https://live.messebackend.aws.corussoft.de/webservice/search'
     headers = {
         'authority': 'live.messebackend.aws.corussoft.de',
@@ -29,70 +59,84 @@ async def get_exhibitors():
         'sec-fetch-site': 'cross-site',
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     }
-    params = {
-        'topic': '2022_FRUIT',
-        'os': 'web',
-        'appUrl': 'https://www.fruitlogistica.com/en/trade-visitors/exhibitor-search/#/',
-        'lang': 'en',
-        'apiVersion': '39',
-        'timezoneOffset': '-240',
-        'userLang': 'en-US',
-        'filterlist': 'entity_orga,entityexcl_evtd',
-        'startresultrow': '0',
-        'numresultrows': '25',
-        'order': 'lexic',
-    }
+    params = {'topic': '2022_FRUIT', 'os': 'web',
+              'appUrl': 'https://www.fruitlogistica.com/en/trade-visitors/exhibitor-search/#/', 'lang': 'en',
+              'apiVersion': '39', 'timezoneOffset': '-240', 'userLang': 'en-US',
+              'filterlist': 'entity_orga,entityexcl_evtd', 'startresultrow': str(start_result_row),
+              'numresultrows': '25', 'order': 'lexic'}
 
     async with httpx.AsyncClient(event_hooks={'request': [log_request], 'response': [log_response]}, headers=headers, params=params) as client:
         response = await client.post(url)
-        data = response.text
-        # print(data)
-        # exhibitors = data['result']['exhibitors']
-        return data
+        xml_data = response.text
+        return xml_data
 
 
 async def main():
     start_time = perf_counter()
-    end_time = perf_counter()
-    exhibitors = await get_exhibitors()
-    root = ET.fromstring(exhibitors)
+    end_time = None
 
-    for organization in root.findall('.//organization'):
-        name = organization.attrib.get('name')
-        country_code = organization.attrib.get('countryCode')
-        country = organization.attrib.get('country')
-        city = organization.attrib.get('city')
-        postcode = organization.attrib.get('postCode')
-        email = organization.attrib.get('email')
-        stand_name = organization.find('.//stand').attrib.get('standName')
+    exhibitors = []
+    start_result_row = 0
+    total_exhibitors = 0
 
-        # Extract contacts
-        contacts = organization.find('.//contacts')
-        contact_persons = []
-        for contact in contacts.findall('.//contactPerson'):
-            contact_person = {
-                'firstName': contact.attrib.get('firstName'),
-                'lastName': contact.attrib.get('lastName'),
-                'position': contact.attrib.get('position')
+    if os.path.exists('exhibitors.xml'):
+        print("Using cached data...")
+        with open('exhibitors.xml', 'r') as f:
+            xml_data = f.read()
+            print("Cached data loaded")
+    else:
+        print("Fetching live data...")
+        xml_data = await get_exhibitors(start_result_row)
+        print("Caching live data...")
+        cache_xml(xml_data)
+
+
+    root = ET.fromstring(xml_data)
+    total_exhibitors = int(root.find('.//entities').attrib.get('count'))
+
+    while start_result_row < total_exhibitors:
+        xml_data = await get_exhibitors(start_result_row)
+        root = ET.fromstring(xml_data)
+
+
+        for organization in root.findall('.//organization'):
+            exhibitor = {
+                'name': organization.attrib.get('name') if 'name' in organization.attrib else 'N/A',
+                'countryCode': organization.attrib.get('countryCode') if 'countryCode' in organization.attrib else 'N/A',
+                'country': organization.attrib.get('country') if 'country' in organization.attrib else 'N/A',
+                'city': organization.attrib.get('city') if 'city' in organization.attrib else 'N/A',
+                'postcode': organization.attrib.get('postCode') if 'postCode' in organization.attrib else 'N/A',
+                'email': organization.attrib.get('email') if 'email' in organization.attrib else 'N/A',
+                'standName': None,  # Initialize standName to None by default
+                # Extract contacts
+                'contacts': [{
+                    'firstName': contact.attrib.get('firstName') if 'firstName' in contact.attrib else 'N/A',
+                    'lastName': contact.attrib.get('lastName') if 'lastName' in contact.attrib else 'N/A',
+                    'position': contact.attrib.get('position') if 'position' in contact.attrib else 'N/A'
+                } for contact in organization.findall('.//contacts/contactPerson')],
+                'teaser': organization.find('.//description/teaser').text.strip() if organization.find('.//description/teaser') is not None else 'N/A',
+                'product_names': [product.attrib.get('name') for product in organization.findall('.//products/product')]
             }
-            contact_persons.append(contact_person)
+            # Check if <stand> element exists
+            stand_element = organization.find('.//stand')
+            if stand_element is not None:
+                exhibitor['standName'] = stand_element.attrib.get('standName')
 
-        # Print or process the extracted data
-        print(f"Name: {name}")
-        print(f"Country Code: {country_code}")
-        print(f"Country: {country}")
-        print(f"City: {city}")
-        print(f"Postcode: {postcode}")
-        print(f"Email: {email}")
-        print(f"Stand Name: {stand_name}")
-        print("Contacts:")
-        for contact_person in contact_persons:
-            print(f" - {contact_person['firstName']} {contact_person['lastName']}, {contact_person['position']}")
+
+            exhibitors.append(exhibitor)
+
+        start_result_row += 25
+
+    print("Saving to Excel...")
+    save_to_excel(exhibitors)
+
+    # Now update the end time
+    end_time = perf_counter()
 
     # print("Exhibitors:", exhibitors)
     print(f"Time taken: {end_time - start_time:.2f} seconds")
-
-
+    print(f"Total exhibitors: {total_exhibitors}")
 
 if __name__ == '__main__':
     asyncio.run(main())
+    print("Done")
