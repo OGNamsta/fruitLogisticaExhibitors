@@ -9,7 +9,7 @@ This Python script fetches exhibitor data from an API endpoint, caches the XML r
 ### 1. Clone the repository:
 `git clone https://github.com/OGNamsta/fruitLogisticaExhibitors.git`
 
-### 2.Install the required dependencies:
+### 2. Install the required dependencies:
 `pip install asyncio httpx openpyxl`
 
 ## Usage
